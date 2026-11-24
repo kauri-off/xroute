@@ -40,12 +40,14 @@ import static dev.xroute.EditorStyle.*;
 
 final class EditorMap {
     interface Listener {
+        void toggleFullscreen();
         void tap(GeoPoint point);
         void select(int index);
         void drag(int index, GeoPoint point, boolean finished);
     }
 
     final FrameLayout view;
+    private final ImageButton expand;
     private final MapView map;
     private final TextView summary, hint;
     private final Polyline border, line;
@@ -102,14 +104,9 @@ final class EditorMap {
         toolsParams.topMargin = style.dp(10);
         toolsParams.setMarginEnd(style.dp(10));
         view.addView(tools, toolsParams);
-        mapButton(tools, "Показать весь маршрут", "fit", this::fit);
+        expand = mapButton(tools, "На весь экран", "expand", listener::toggleFullscreen);
         mapButton(tools, "Увеличить масштаб", "plus", () -> map.getController().zoomIn());
         mapButton(tools, "Уменьшить масштаб", "minus", () -> map.getController().zoomOut());
-        mapButton(tools, "Установить точку в центре карты", "center", () -> {
-            IGeoPoint center = map.getMapCenter();
-            listener.tap(new GeoPoint(center.getLatitude(), center.getLongitude()));
-        });
-
         hint = style.label("", 12, INK, true);
         hint.setPadding(style.dp(10), style.dp(7), style.dp(10), style.dp(7));
         hint.setBackground(style.shape(0xebffffff, 11));
@@ -171,7 +168,7 @@ final class EditorMap {
         return path;
     }
 
-    private void mapButton(LinearLayout column, String label, String icon, Runnable action) {
+    private ImageButton mapButton(LinearLayout column, String label, String icon, Runnable action) {
         ImageButton button = new ImageButton(view.getContext());
         button.setContentDescription(label);
         button.setTooltipText(label);
@@ -181,6 +178,19 @@ final class EditorMap {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, style.dp(48));
         params.bottomMargin = style.dp(5);
         column.addView(button, params);
+        return button;
+    }
+
+    void fullscreen(boolean enabled) {
+        String label = enabled ? "Свернуть карту" : "На весь экран";
+        expand.setContentDescription(label);
+        expand.setTooltipText(label);
+        expand.setImageDrawable(new MapIcon(enabled ? "collapse" : "expand"));
+    }
+
+    void addCenter() {
+        IGeoPoint center = map.getMapCenter();
+        listener.tap(new GeoPoint(center.getLatitude(), center.getLongitude()));
     }
 
     void renderPoints(List<GeoPoint> points, int selected) {
@@ -419,15 +429,14 @@ final class EditorMap {
                     canvas.drawLine(5, 12, 19, 12, paint);
                     if (type.equals("plus")) canvas.drawLine(12, 5, 12, 19, paint);
                 }
-                case "center" -> {
-                    canvas.drawCircle(12, 12, 7, paint);
-                    canvas.drawLine(12, 2, 12, 7, paint);
-                    canvas.drawLine(12, 17, 12, 22, paint);
-                    canvas.drawLine(2, 12, 7, 12, paint);
-                    canvas.drawLine(17, 12, 22, 12, paint);
-                    canvas.drawCircle(12, 12, 1, paint);
+                case "collapse" -> {
+                    for (int i = 0; i < 4; i++) {
+                        canvas.drawLine(4, 9, 9, 9, paint);
+                        canvas.drawLine(9, 9, 9, 4, paint);
+                        canvas.rotate(90, 12, 12);
+                    }
                 }
-                case "fit" -> {
+                case "expand" -> {
                     Path corners = new Path();
                     corners.moveTo(4, 9); corners.lineTo(4, 4); corners.lineTo(9, 4);
                     corners.moveTo(15, 4); corners.lineTo(20, 4); corners.lineTo(20, 9);

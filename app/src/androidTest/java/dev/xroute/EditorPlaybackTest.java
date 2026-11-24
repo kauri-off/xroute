@@ -21,7 +21,7 @@ public class EditorPlaybackTest {
         framework.bind(context);
         var draft = context.getSharedPreferences("editor", Context.MODE_PRIVATE);
         assertTrue(draft.edit().clear().putString("points", "[[55.75,37.62],[55.751,37.621]]")
-                .putString("target", TestFramework.TRACKER).putString("speed", "5").commit());
+                .putString("target", "org.example.old").putString("speed", "5").commit());
         try (ActivityScenario<Editor> screen = ActivityScenario.launch(Editor.class)) {
             waitUntil(() -> {
                 boolean[] ready = {false};

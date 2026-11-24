@@ -63,21 +63,25 @@ public final class Editor extends Activity implements EditorMap.Listener {
     private EditorStyle style;
     private EditorMap editorMap;
     private LinearLayout root, header, mapPanel;
-    private EditText target, speed;
+    private EditText speed;
+    private Button targetButton, saveRoute, openRoute;
+    private SharedPreferences library;
+    private String target;
+    private boolean fullscreen;
+    private android.window.OnBackInvokedCallback backCallback;
     private Spinner profile;
     private Switch roundTurns;
-    private Button pointPicker, move, delete, scopeRequest, routeRequest, undoRoute, preview, start, stop;
+    private Button pointPicker, move, delete, routeRequest, undoRoute, preview, start, stop;
     private TextView connection, scopeStatus, routeStatus, speedStatus, sessionStatus;
     private LinearLayout controls;
     private boolean split;
     private int selected = -1;
     private boolean moving, dragging, updatingFields, destroyed;
-    private boolean routing, publishing, scopePending, vectorLoading, vectorFailed;
+    private boolean routing, publishing, vectorLoading, vectorFailed;
     private XposedService service;
     private List<String> scope;
     private Session active;
     private boolean sessionStored;
-    private String scopeMessage;
     private String sessionMessage;
     private Route route, previewRoute;
     private List<GeoPoint> originalWaypoints = Collections.emptyList();
@@ -91,7 +95,8 @@ public final class Editor extends Activity implements EditorMap.Listener {
         companion = (Companion) getApplication();
         draft = getSharedPreferences("editor", MODE_PRIVATE);
         style = new EditorStyle(this);
-        restorePoints();
+        library = getSharedPreferences("routes", MODE_PRIVATE);
+        restorePoints(draft);
 
         root = style.column();
         root.setBackgroundColor(BACKGROUND);
@@ -124,16 +129,11 @@ public final class Editor extends Activity implements EditorMap.Listener {
         }
 
         updatingFields = true;
-        target.setText(draft.getString("target", ""));
+        target = draft.getString("target", "");
         speed.setText(draft.getString("speed", "5"));
         profile.setSelection(Math.max(0, Math.min(draft.getInt("profile", 0), PROFILES.length - 1)));
         roundTurns.setChecked(draft.getBoolean("round_turns", false));
         updatingFields = false;
-        target.addTextChangedListener(textWatcher(() -> {
-            scopeMessage = null;
-            invalidateDraft();
-            updateVectorLabels();
-        }));
         speed.addTextChangedListener(textWatcher(() -> changeMotion(false)));
         profile.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View item, int position, long id) {
@@ -147,6 +147,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
         updatePointControls();
         updateRoute(true);
         updateVectorLabels();
+        if (state != null && state.getBoolean("fullscreen")) toggleFullscreen();
         root.requestFocus();
         root.requestApplyInsets();
     }
@@ -184,7 +185,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
             view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, keyboard));
             boolean typing = keyboard > bars.bottom + style.dp(60);
             if (mapPanel != null) mapPanel.setVisibility(typing ? View.GONE : View.VISIBLE);
-            if (header != null) header.setVisibility(typing ? View.GONE : View.VISIBLE);
+            if (header != null) header.setVisibility(typing || fullscreen ? View.GONE : View.VISIBLE);
             if (split && controls != null) {
                 LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) controls.getLayoutParams();
                 int width = typing ? -1 : style.dp(Math.max(300,
@@ -250,31 +251,10 @@ public final class Editor extends Activity implements EditorMap.Listener {
 
         fields.addView(style.heading("Целевое приложение"));
         style.spacing(fields, 7);
-        target = new EditText(this);
-        target.setId(View.generateViewId());
-        target.setSingleLine(true);
-        target.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        target.setImeOptions(EditorInfo.IME_ACTION_NEXT);
-        target.setHint("org.example.app");
-        target.setContentDescription("Имя пакета целевого приложения");
-        target.setOnEditorActionListener((view, action, event) -> {
-            if (action != EditorInfo.IME_ACTION_NEXT) return false;
-            speed.requestFocus();
-            return true;
-        });
-        style.styleField(target);
-        fields.addView(target, new LinearLayout.LayoutParams(-1, -2));
-
-        LinearLayout scopeRow = style.row();
+        targetButton = style.button("", INK, ACCENT_LIGHT, this::chooseTarget);
+        fields.addView(targetButton);
         scopeStatus = style.label("", 12, MUTED, false);
-        scopeStatus.setPadding(0, style.dp(8), style.dp(6), style.dp(8));
-        scopeStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        scopeRow.addView(scopeStatus, new LinearLayout.LayoutParams(0, -2, 1));
-        scopeRequest = style.button("Запросить", ACCENT, ACCENT_LIGHT, this::requestScope);
-        scopeRequest.setContentDescription("Запросить область действия для пакета в Vector");
-        scopeRow.addView(scopeRequest, new LinearLayout.LayoutParams(-2, -2));
-        fields.addView(scopeRow, new LinearLayout.LayoutParams(-1, -2));
+        fields.addView(scopeStatus);
 
         style.spacing(fields, 10);
         fields.addView(style.heading("Движение"));
@@ -351,6 +331,13 @@ public final class Editor extends Activity implements EditorMap.Listener {
         routeStatus.setPadding(0, style.dp(5), 0, 0);
         routeStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         fields.addView(routeStatus);
+
+        LinearLayout files = style.row();
+        saveRoute = style.button("Сохранить…", ACCENT, ACCENT_LIGHT, this::nameRoute);
+        openRoute = style.button("Открыть…", ACCENT, ACCENT_LIGHT, this::chooseRoute);
+        style.weightedButton(files, saveRoute, 1, 0);
+        style.weightedButton(files, openRoute, 1, 6);
+        fields.addView(files);
 
         View separator = new View(this);
         separator.setBackgroundColor(STROKE);
@@ -429,19 +416,21 @@ public final class Editor extends Activity implements EditorMap.Listener {
     }
 
     private void choosePoint() {
-        if (points.isEmpty()) return;
         String[] options = new String[points.size()];
         for (int i = 0; i < points.size(); i++) {
             GeoPoint point = points.get(i);
             options[i] = String.format(Locale.ROOT, "%d     %.6f, %.6f",
                     i + 1, point.getLatitude(), point.getLongitude());
         }
-        new AlertDialog.Builder(this).setTitle("Точки маршрута")
+        var dialogBuilder = new AlertDialog.Builder(this).setTitle("Точки маршрута")
                 .setSingleChoiceItems(options, selected, (dialog, index) -> {
                     select(index);
                     editorMap.center(points.get(index));
                     dialog.dismiss();
-                }).setNegativeButton("Закрыть", null).show();
+                }).setNegativeButton("Закрыть", null)
+                .setPositiveButton(moving ? "Перенести в центр" : "Добавить в центре", (dialog, which) -> editorMap.addCenter());
+        if (!points.isEmpty()) dialogBuilder.setNeutralButton("Весь маршрут", (dialog, which) -> editorMap.fit());
+        dialogBuilder.show();
     }
 
     private void toggleMove() {
@@ -471,7 +460,6 @@ public final class Editor extends Activity implements EditorMap.Listener {
         pointPicker.setText(selected >= 0 ? "Точка " + (selected + 1) + " ▾" : "Точки");
         pointPicker.setContentDescription(selected >= 0 ? "Выбрать точку. Выбрана точка " + (selected + 1)
                 + " из " + points.size() : "Точки маршрута");
-        pointPicker.setEnabled(!points.isEmpty());
         move.setEnabled(selected >= 0);
         move.setText(moving ? "Отмена" : "Перенести");
         move.setContentDescription(moving ? "Отменить перенос" : "Перенести выбранную точку");
@@ -659,13 +647,15 @@ public final class Editor extends Activity implements EditorMap.Listener {
         updateMapHint();
     }
 
-    private String packageName() {
-        return target.getText().toString().trim();
-    }
-
-    private boolean validTarget() {
-        String name = packageName();
-        return PACKAGE.matcher(name).matches() && !name.equals(getPackageName());
+    private void chooseTarget() {
+        if (scope == null || scope.size() < 2) return;
+        String[] packages = scope.toArray(new String[0]);
+        new AlertDialog.Builder(this).setTitle("Приложения из Vector")
+                .setSingleChoiceItems(packages, scope.indexOf(target), (dialog, index) -> {
+                    target = packages[index];
+                    updateVectorLabels();
+                    dialog.dismiss();
+                }).show();
     }
 
     private void refreshVector() {
@@ -676,8 +666,6 @@ public final class Editor extends Activity implements EditorMap.Listener {
             active = null;
             sessionStored = false;
             vectorFailed = false;
-            scopePending = false;
-            scopeMessage = null;
             sessionMessage = null;
         }
         if (bound == null) {
@@ -712,7 +700,10 @@ public final class Editor extends Activity implements EditorMap.Listener {
             boolean exists = stored, readFailed = failed, readConfirmed = read;
             main.post(() -> {
                 if (destroyed || service != bound) return;
-                scope = allowed;
+                scope = allowed == null ? null : allowed.stream()
+                        .filter(name -> name != null && PACKAGE.matcher(name).matches() && !name.equals(getPackageName()))
+                        .distinct().sorted().collect(java.util.stream.Collectors.toList());
+                if (scope != null && !scope.contains(target)) target = scope.size() == 1 ? scope.get(0) : "";
                 if (readConfirmed) {
                     active = current;
                     sessionStored = exists;
@@ -724,48 +715,11 @@ public final class Editor extends Activity implements EditorMap.Listener {
         });
     }
 
-    private void requestScope() {
-        if (service == null || !validTarget() || scopePending) return;
-        closeKeyboard();
-        XposedService bound = service;
-        String requested = packageName();
-        scopePending = true;
-        scopeMessage = "Подтвердите запрос в Vector.";
-        updateVectorLabels();
-        companion.vector.execute(() -> {
-            try {
-                bound.requestScope(Collections.singletonList(requested), new XposedService.OnScopeEventListener() {
-                    @Override public void onScopeRequestApproved(List<String> packages) {
-                        main.post(() -> finishScopeRequest(bound, requested,
-                                packages != null && packages.contains(requested), null));
-                    }
-
-                    @Override public void onScopeRequestFailed(String reason) {
-                        main.post(() -> finishScopeRequest(bound, requested, false, reason));
-                    }
-                });
-            } catch (RuntimeException e) {
-                main.post(() -> finishScopeRequest(bound, requested, false, message(e)));
-            }
-        });
-    }
-
-    private void finishScopeRequest(XposedService bound, String requested, boolean approved, String reason) {
-        if (destroyed || service != bound) return;
-        scopePending = false;
-        if (requested.equals(packageName())) {
-            scopeMessage = approved ? "Доступ выдан. Перезапустите целевое приложение."
-                    : "Добавьте пакет в области действия XRoute в Vector."
-                    + (reason == null || reason.trim().isEmpty() ? "" : " " + reason);
-        }
-        refreshVector();
-    }
-
     private void publish(boolean play) {
-        if (service == null || publishing || (play && (route == null || !validTarget()))) return;
+        if (service == null || publishing || (play && (route == null || !inScope()))) return;
         closeKeyboard();
         XposedService bound = service;
-        String name = packageName();
+        String name = target;
         Route snapshot = route;
         publishing = true;
         sessionMessage = play ? "Публикуем маршрут…" : "Останавливаем сессию…";
@@ -809,7 +763,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
     }
 
     private boolean inScope() {
-        return scope != null && scope.contains(packageName());
+        return scope != null && scope.contains(target);
     }
 
     private void updateVectorLabels() {
@@ -818,18 +772,16 @@ public final class Editor extends Activity implements EditorMap.Listener {
         connection.setContentDescription(connected ? "Vector подключён" : "Vector не подключён");
         connection.setBackground(style.shape(connected ? ACCENT_LIGHT : SURFACE, 20));
         String info;
-        String name = packageName();
         if (!connected) info = "Включите XRoute в менеджере Vector.";
-        else if (name.isEmpty()) info = "Укажите пакет приложения для области действия.";
-        else if (!validTarget()) info = "Проверьте имя пакета целевого приложения.";
-        else if (scopeMessage != null) info = scopeMessage;
-        else if (inScope()) info = "Пакет в области действия Vector.";
         else if (scope == null && vectorLoading) info = "Проверяем область действия…";
-        else if (scope == null) info = "Проверьте область действия XRoute в Vector.";
-        else info = "Добавьте пакет в область действия Vector.";
+        else if (scope == null) info = "Не удалось прочитать область действия Vector.";
+        else if (scope.isEmpty()) info = "Выберите приложение в области действия XRoute в Vector.";
+        else info = "";
         scopeStatus.setText(info);
-        scopeRequest.setVisibility(connected && validTarget() && !inScope() ? View.VISIBLE : View.GONE);
-        scopeRequest.setEnabled(!scopePending && !publishing);
+        scopeStatus.setVisibility(info.isEmpty() ? View.GONE : View.VISIBLE);
+        targetButton.setVisibility(scope == null || scope.isEmpty() ? View.GONE : View.VISIBLE);
+        targetButton.setEnabled(scope != null && scope.size() > 1 && !publishing);
+        targetButton.setText(inScope() ? target : "Выбрать приложение…");
         updateSessionClock();
         updateActions();
     }
@@ -861,8 +813,10 @@ public final class Editor extends Activity implements EditorMap.Listener {
             setRouteStatus("Для построения по дорожкам доступно до "
                     + WalkingDirections.MAX_WAYPOINTS + " точек.", false);
         }
+        saveRoute.setEnabled(route != null && !dragging);
+        openRoute.setEnabled(!library.getAll().isEmpty());
         preview.setEnabled(route != null && !dragging);
-        start.setEnabled(service != null && !publishing && route != null && validTarget()
+        start.setEnabled(service != null && !publishing && route != null
                 && inScope() && !dragging);
         start.setText(sessionStored ? "Заново" : "Старт");
         start.setContentDescription(sessionStored ? "Запустить черновик заново" : "Запустить маршрут");
@@ -875,22 +829,25 @@ public final class Editor extends Activity implements EditorMap.Listener {
         root.requestFocus();
     }
 
-    private void restorePoints() {
-        readPoints("points", POINT_LIMIT, points);
+    private void restorePoints(SharedPreferences source) {
+        points.clear();
+        selected = -1;
+        originalWaypoints = Collections.emptyList();
+        readPoints(source, "points", POINT_LIMIT, points);
         if (!points.isEmpty()) {
-            selected = Math.min(points.size() - 1, Math.max(0, draft.getInt("selected", points.size() - 1)));
+            selected = Math.min(points.size() - 1, Math.max(0, source.getInt("selected", points.size() - 1)));
         }
         ArrayList<GeoPoint> savedWaypoints = new ArrayList<>();
-        readPoints("original_waypoints", WalkingDirections.MAX_WAYPOINTS, savedWaypoints);
+        readPoints(source, "original_waypoints", WalkingDirections.MAX_WAYPOINTS, savedWaypoints);
         if (savedWaypoints.size() >= 2) {
             originalWaypoints = savedWaypoints;
-            originalSelection = Math.min(savedWaypoints.size() - 1, Math.max(0, draft.getInt("original_selection", 0)));
+            originalSelection = Math.min(savedWaypoints.size() - 1, Math.max(0, source.getInt("original_selection", 0)));
         }
     }
 
-    private void readPoints(String key, int limit, List<GeoPoint> destination) {
+    private void readPoints(SharedPreferences source, String key, int limit, List<GeoPoint> destination) {
         try {
-            JSONArray saved = new JSONArray(draft.getString(key, "[]"));
+            JSONArray saved = new JSONArray(source.getString(key, "[]"));
             for (int i = 0; i < Math.min(saved.length(), limit); i++) {
                 JSONArray point = saved.getJSONArray(i);
                 Route.Point checked = new Route.Point(point.getDouble(0), point.getDouble(1));
@@ -908,8 +865,14 @@ public final class Editor extends Activity implements EditorMap.Listener {
     }
 
     private void saveDraft() {
-        var edit = draft.edit().putString("points", encodePoints(points)).putInt("selected", selected)
-                .putString("target", target.getText().toString()).putString("speed", speed.getText().toString())
+        var edit = writeRoute(draft.edit()).putString("target", target);
+        editorMap.save(edit);
+        edit.apply();
+    }
+
+    private SharedPreferences.Editor writeRoute(SharedPreferences.Editor edit) {
+        edit.putString("points", encodePoints(points)).putInt("selected", selected)
+                .putString("speed", speed.getText().toString())
                 .putInt("profile", Math.max(0, profile.getSelectedItemPosition()))
                 .putBoolean("round_turns", roundTurns.isChecked());
         if (originalWaypoints.isEmpty()) {
@@ -918,8 +881,96 @@ public final class Editor extends Activity implements EditorMap.Listener {
             edit.putString("original_waypoints", encodePoints(originalWaypoints))
                     .putInt("original_selection", originalSelection);
         }
-        editorMap.save(edit);
-        edit.apply();
+        return edit;
+    }
+
+    private void nameRoute() {
+        EditText name = new EditText(this);
+        name.setSingleLine(true);
+        name.setHint("Название маршрута");
+        var dialog = new AlertDialog.Builder(this).setTitle("Сохранить маршрут").setView(name)
+                .setPositiveButton("Сохранить", null).setNegativeButton("Отмена", null).show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String title = name.getText().toString().trim();
+            if (title.isEmpty()) {
+                name.setError("Введите название");
+                return;
+            }
+            dialog.dismiss();
+            if (library.contains(title)) {
+                new AlertDialog.Builder(this).setMessage("Заменить маршрут «" + title + "»?")
+                        .setPositiveButton("Заменить", (d, w) -> storeRoute(title))
+                        .setNegativeButton("Отмена", null).show();
+            } else storeRoute(title);
+        });
+    }
+
+    private void storeRoute(String title) {
+        String id = library.getString(title, null);
+        if (id == null) id = java.util.UUID.randomUUID().toString();
+        writeRoute(getSharedPreferences("route-" + id, MODE_PRIVATE).edit()).apply();
+        library.edit().putString(title, id).apply();
+        updateActions();
+        android.widget.Toast.makeText(this, "Маршрут сохранён", android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    private void chooseRoute() {
+        String[] names = library.getAll().keySet().toArray(new String[0]);
+        Arrays.sort(names, String.CASE_INSENSITIVE_ORDER);
+        new AlertDialog.Builder(this).setTitle("Открыть маршрут").setItems(names, (dialog, index) -> {
+            var saved = getSharedPreferences("route-" + library.getString(names[index], ""), MODE_PRIVATE);
+            restorePoints(saved);
+            updatingFields = true;
+            speed.setText(saved.getString("speed", "5"));
+            profile.setSelection(saved.getInt("profile", 0));
+            roundTurns.setChecked(saved.getBoolean("round_turns", false));
+            updatingFields = false;
+            moving = false;
+            changePoints();
+            editorMap.fit();
+            saveDraft();
+        }).setNegativeButton("Отмена", null).show();
+    }
+
+    @Override public void toggleFullscreen() {
+        fullscreen = !fullscreen;
+        controls.setVisibility(fullscreen ? View.GONE : View.VISIBLE);
+        header.setVisibility(fullscreen ? View.GONE : View.VISIBLE);
+        editorMap.fullscreen(fullscreen);
+        if (Build.VERSION.SDK_INT >= 30) {
+            var controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                if (fullscreen) controller.hide(WindowInsets.Type.systemBars());
+                else controller.show(WindowInsets.Type.systemBars());
+            }
+        } else {
+            var decor = getWindow().getDecorView();
+            int flags = View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+            int current = decor.getSystemUiVisibility();
+            decor.setSystemUiVisibility(fullscreen ? current | flags : current & ~flags);
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (fullscreen) {
+                backCallback = this::toggleFullscreen;
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                        android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+            } else {
+                getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
+            }
+        }
+    }
+
+    @android.annotation.SuppressLint("GestureBackNavigation")
+    @Override public void onBackPressed() {
+        if (fullscreen) toggleFullscreen();
+        else super.onBackPressed();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putBoolean("fullscreen", fullscreen);
     }
 
     private static String distanceText(double meters) {
