@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <permission android:name="${applicationId}.permission.QUERY_PLAYBACK" android:protectionLevel="signature"/>
+    <uses-permission android:name="${applicationId}.permission.QUERY_PLAYBACK"/>
     <application android:icon="@drawable/ic_route" android:name=".Companion" android:label="XRoute" android:description="@string/description" android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".Editor" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter>

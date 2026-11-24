@@ -67,6 +67,7 @@ final class EditorMap {
         view.setBackground(style.shape(0xffdce9e4, 18));
         view.setClipToOutline(true);
         map = new MapView(activity);
+        map.setDestroyMode(false);
         map.setMultiTouchControls(true);
         map.setVerticalMapRepetitionEnabled(false);
         map.setTileSource(TileSourceFactory.MAPNIK);

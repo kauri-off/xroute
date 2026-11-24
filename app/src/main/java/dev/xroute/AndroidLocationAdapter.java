@@ -18,6 +18,7 @@ import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.os.SystemClock;
 import android.util.Log;
 import io.github.libxposed.api.XposedInterface.Chain;
 import io.github.libxposed.api.XposedInterface.Hooker;
@@ -30,6 +31,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -53,12 +55,15 @@ final class AndroidLocationAdapter {
             Object result = chain.proceed();
             if (chain.getThisObject() instanceof Application app && pkg.equals(app.getPackageName())) {
                 appContext = app;
+                DeliveryProbe.register(app, source);
             }
             return result;
         }, Context.class);
         hook(LocationManager.class, "last-location", "getLastKnownLocation", chain -> {
             Location original = (Location) chain.proceed();
-            return GPS.equals(chain.getArg(0)) ? replace(original, true) : original;
+            if (!GPS.equals(chain.getArg(0))) return original;
+            Location fix = latest((LocationManager) chain.getThisObject());
+            return fix != null ? fix : original;
         }, String.class);
 
         boolean modern = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S;
@@ -107,11 +112,9 @@ final class AndroidLocationAdapter {
         }
     }
 
-    private Location replace(Location original, boolean fresh) {
-        if (original == null || !GPS.equals(original.getProvider())) return original;
-        Location sample = fresh ? source.sample(GPS)
-                : source.sample(GPS, original.getTime(), original.getElapsedRealtimeNanos());
-        return sample != null && preciseAccess() ? sample : original;
+    private Location latest(LocationManager manager) {
+        Location fix = source.sample(GPS);
+        return fix != null && preciseAccess() && manager.isProviderEnabled(GPS) ? fix : null;
     }
 
     @SuppressWarnings("unchecked")
@@ -120,9 +123,28 @@ final class AndroidLocationAdapter {
             return chain.proceed();
         }
         Consumer<Location> receiver = (Consumer<Location>) callback;
+        LocationManager manager = (LocationManager) chain.getThisObject();
         Object[] arguments = chain.getArgs().toArray();
-        arguments[callbackIndex] = (Consumer<Location>) original -> receiver.accept(replace(original, false));
-        return chain.proceed(arguments);
+        CancellationSignal cancel = (CancellationSignal) arguments[callbackIndex - 2];
+        Executor destination = (Executor) arguments[callbackIndex - 1];
+        AtomicBoolean delivered = new AtomicBoolean();
+        Consumer<Location> once = fix -> {
+            if ((cancel == null || !cancel.isCanceled()) && delivered.compareAndSet(false, true)) receiver.accept(fix);
+        };
+        arguments[callbackIndex] = (Consumer<Location>) original -> {
+            if (delivered.get()) return;
+            Location fix = latest(manager);
+            once.accept(fix != null ? fix : original);
+        };
+        Object result = chain.proceed(arguments);
+        if (!delivered.get() && latest(manager) != null) {
+            destination.execute(() -> {
+                if (delivered.get()) return;
+                Location fix = latest(manager);
+                if (fix != null) once.accept(fix);
+            });
+        }
+        return result;
     }
 
     private void installLegacy() {
@@ -272,21 +294,28 @@ final class AndroidLocationAdapter {
         private volatile Pulse pulse;
 
         void startTimer(long interval, Executor destination, BooleanSupplier enabled) {
-            pulse = new Pulse(interval, destination, enabled);
-            pulse.schedule();
+            Pulse next = new Pulse(interval, executor == null ? destination : dispatch, enabled);
+            pulse = next;
+            next.unsubscribe = source.observeSessionChanges(next::restart);
+            next.restart();
         }
 
         void stopTimer() {
             Pulse previous = pulse;
             pulse = null;
-            if (previous != null) previous.handler.removeCallbacks(previous);
+            if (previous != null) {
+                previous.handler.removeCallbacksAndMessages(previous);
+                if (previous.unsubscribe != null) previous.unsubscribe.run();
+            }
         }
 
-        private final class Pulse implements Runnable {
+        private final class Pulse {
             final Handler handler = new Handler(Looper.getMainLooper());
             final long interval;
             final Executor destination;
             final BooleanSupplier enabled;
+            volatile long revision;
+            Runnable unsubscribe;
 
             Pulse(long interval, Executor destination, BooleanSupplier enabled) {
                 this.interval = interval;
@@ -294,28 +323,41 @@ final class AndroidLocationAdapter {
                 this.enabled = enabled;
             }
 
-            void schedule() {
-                if (pulse == this) handler.postDelayed(this, Math.min(interval, Integer.MAX_VALUE));
+            synchronized void restart() {
+                if (pulse != this) return;
+                revision++;
+                handler.removeCallbacksAndMessages(this);
+                gps.filter.resetPlayback();
+                schedule(revision, 0);
             }
 
-            @Override public void run() {
-                if (pulse != this) return;
+            private synchronized void schedule(long expected, long delay) {
+                if (pulse != this || revision != expected) return;
+                long now = SystemClock.uptimeMillis();
+                handler.postAtTime(() -> dispatch(expected), this, now + Math.min(Long.MAX_VALUE - now, delay));
+            }
+
+            private void dispatch(long expected) {
+                if (pulse != this || revision != expected) return;
                 try {
-                    destination.execute(() -> {
-                        try {
-                            if (pulse != this) return;
-                            Location fix = source.sample(GPS);
-                            if (fix != null && preciseAccess.getAsBoolean() && enabled.getAsBoolean()
-                                    && pulse == this && gps.filter.acceptTimed(fix, interval, true)) {
-                                listener.onLocationChanged(fix);
-                            }
-                        } finally {
-                            schedule();
-                        }
-                    });
+                    destination.execute(() -> tick(expected));
                 } catch (RejectedExecutionException ignored) {}
             }
+
+            private void tick(long expected) {
+                if (pulse != this || revision != expected) return;
+                var sample = source.sampleForDelivery(GPS);
+                Location fix = sample == null ? null : sample.location();
+                if (fix == null && unsubscribe != null) return;
+                if (fix != null && preciseAccess.getAsBoolean() && enabled.getAsBoolean()
+                        && pulse == this && revision == expected && gps.filter.acceptTimed(fix, interval, true)) {
+                    listener.onLocationChanged(fix);
+                    source.delivered(sample);
+                }
+                schedule(expected, interval);
+            }
         }
+
         private final Executor dispatch = task -> executor.execute(task);
 
         ListenerGroup(LocationListener listener, PlaybackSource source, BooleanSupplier preciseAccess) {
@@ -385,6 +427,12 @@ final class AndroidLocationAdapter {
         private Location previousReplacement;
 
         GpsFilter(float distance) { this.distance = distance; }
+
+        synchronized void resetPlayback() {
+            lastElapsed = 0;
+            lastTimed = false;
+            previousReplacement = null;
+        }
 
         synchronized boolean accept(Location location, boolean replacement) {
             if (distance <= 0) return true;

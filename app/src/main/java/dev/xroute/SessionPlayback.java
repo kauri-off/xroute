@@ -2,6 +2,7 @@ package dev.xroute;
 
 import android.content.SharedPreferences;
 import android.location.Location;
+import android.os.SystemClock;
 import java.util.Objects;
 import java.util.function.Consumer;
 import org.json.JSONException;
@@ -13,6 +14,8 @@ final class SessionPlayback implements PlaybackSource {
     private String previous;
     private Session session;
     private boolean readFailed;
+    private long deliveredSession;
+    private DeliveryReceipt lastReceipt;
 
     SessionPlayback(String packageName, SharedPreferences preferences, Consumer<Exception> onReadError) {
         this.packageName = packageName;
@@ -49,9 +52,34 @@ final class SessionPlayback implements PlaybackSource {
         return sample(active(), provider, wallTimeMillis, elapsedRealtimeNanos);
     }
 
+    @Override public DeliveryFix sampleForDelivery(String provider) {
+        Session current = active();
+        Location fix = sample(current, provider, System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos());
+        return fix == null ? null : new DeliveryFix(fix, current.startMs());
+    }
+
+    @Override public synchronized void delivered(DeliveryFix fix) {
+        if (session != null && session.startMs() == fix.sessionStartMs()) {
+            deliveredSession = fix.sessionStartMs();
+            lastReceipt = new DeliveryReceipt(fix.location().getTime(), SystemClock.elapsedRealtime());
+        }
+    }
+
+    @Override public synchronized DeliveryReceipt lastDelivery(long sessionStartMs) {
+        return sessionStartMs == deliveredSession ? lastReceipt : null;
+    }
+
     @Override public PlaybackSource snapshot() {
         Session session = active();
         return (provider, wallTime, elapsedRealtime) -> sample(session, provider, wallTime, elapsedRealtime);
+    }
+
+    @Override public Runnable observeSessionChanges(Runnable listener) {
+        SharedPreferences.OnSharedPreferenceChangeListener observer = (prefs, key) -> {
+            if (key == null || key.equals(Session.KEY)) listener.run();
+        };
+        preferences.registerOnSharedPreferenceChangeListener(observer);
+        return () -> preferences.unregisterOnSharedPreferenceChangeListener(observer);
     }
 
     private static Location sample(Session session, String provider, long wallTime, long elapsedRealtime) {

@@ -14,6 +14,7 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.location.LocationRequest;
 import android.os.Build;
+import android.os.CancellationSignal;
 import android.os.Process;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -44,6 +45,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -110,7 +112,8 @@ public class ModuleEntryTest {
         Location second = fix(GPS, start + 2_000, 2_000_000_000L);
         Method last = LocationManager.class.getMethod("getLastKnownLocation", String.class);
         assertRouteLast((Location) framework.dispatch(last, manager, (receiver, args) -> first, GPS));
-        assertNull(framework.dispatch(last, manager, (receiver, args) -> null, GPS));
+        assertRouteLast((Location) framework.dispatch(last, manager, (receiver, args) -> null, GPS));
+        if (Build.VERSION.SDK_INT >= 31) assertCurrentWithoutHardware(framework, manager);
 
         var received = new ArrayList<Location>();
         var timed = new LinkedBlockingQueue<Location>();
@@ -124,23 +127,22 @@ public class ModuleEntryTest {
         var upstream = new AtomicReference<LocationListener>();
         Origin request = (object, args) -> {
             upstream.set((LocationListener) args[args.length - 1]);
+            if (Build.VERSION.SDK_INT >= 31) upstream.get().onLocationChanged(Arrays.asList(first, second));
+            else upstream.get().onLocationChanged(first);
             return null;
         };
         if (Build.VERSION.SDK_INT >= 31) {
             Method updates = LocationManager.class.getMethod("requestLocationUpdates",
                     String.class, LocationRequest.class, Executor.class, LocationListener.class);
             framework.dispatch(updates, manager, request, GPS, new LocationRequest.Builder(1_000).build(), DIRECT, receiver);
-            upstream.get().onLocationChanged(Arrays.asList(first, second));
         } else if (Build.VERSION.SDK_INT == 30) {
             Method updates = LocationManager.class.getMethod("requestLocationUpdates",
                     String.class, long.class, float.class, Executor.class, LocationListener.class);
             framework.dispatch(updates, manager, request, GPS, 1_000L, 0f, DIRECT, receiver);
-            upstream.get().onLocationChanged(first);
         } else {
             Method updates = LocationManager.class.getMethod("requestLocationUpdates",
                     String.class, long.class, float.class, LocationListener.class);
             framework.dispatch(updates, manager, request, GPS, 1_000L, 0f, receiver);
-            upstream.get().onLocationChanged(first);
         }
         assertBatch(Build.VERSION.SDK_INT >= 31 ? Arrays.asList(first, second) : Collections.singletonList(first), received);
 
@@ -157,6 +159,38 @@ public class ModuleEntryTest {
         }, receiver);
         timed.clear();
         assertNull(timed.poll(1500, TimeUnit.MILLISECONDS));
+    }
+
+    @android.annotation.TargetApi(31)
+    @SuppressWarnings("unchecked")
+    private void assertCurrentWithoutHardware(Dispatcher framework, LocationManager manager) throws Throwable {
+        Method current = LocationManager.class.getMethod("getCurrentLocation", String.class, LocationRequest.class,
+                CancellationSignal.class, Executor.class, Consumer.class);
+        var original = new AtomicReference<Consumer<Location>>();
+        Origin neverFix = (object, args) -> {
+            original.set((Consumer<Location>) args[4]);
+            return null;
+        };
+        var queue = new ArrayList<Runnable>();
+        var fixes = new ArrayList<Location>();
+        Executor queued = queue::add;
+        Consumer<Location> receiver = fixes::add;
+        LocationRequest request = new LocationRequest.Builder(1000).build();
+        framework.dispatch(current, manager, neverFix, GPS, request, null, queued, receiver);
+        assertTrue(fixes.isEmpty());
+        assertEquals(1, queue.size());
+        queue.remove(0).run();
+        assertEquals(1, fixes.size());
+        assertRouteLast(fixes.get(0));
+        original.get().accept(null);
+        assertEquals(1, fixes.size());
+
+        CancellationSignal cancel = new CancellationSignal();
+        framework.dispatch(current, manager, neverFix, GPS, request, cancel, queued, receiver);
+        cancel.cancel();
+        queue.remove(0).run();
+        original.get().accept(null);
+        assertEquals(1, fixes.size());
     }
 
     @Test public void fusedLastAndBatchedCallbackRespectPublishedTarget() throws Throwable {

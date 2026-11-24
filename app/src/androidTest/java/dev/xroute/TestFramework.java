@@ -11,7 +11,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 
-final class TestFramework extends IXposedService.Default {
+class TestFramework extends IXposedService.Default {
     static final String TRACKER = "org.example.tracker";
     private final Binder binder = new Binder();
     private final HashMap<String, Object> values = new HashMap<>();

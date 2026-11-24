@@ -1,6 +1,8 @@
 package dev.xroute;
 
+import android.content.Context;
 import android.location.Location;
+import android.os.Looper;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import java.util.ArrayList;
@@ -11,7 +13,10 @@ import java.util.function.BooleanSupplier;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.LooperMode;
 
 import static org.junit.Assert.*;
 
@@ -139,6 +144,78 @@ public class AndroidLocationAdapterTest {
         assertNull(group.registered(false));
         gpsExecutor.execute(() -> fail("A rejected registration replaced the executor"));
         assertEquals(1, firstQueue.size());
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    public void timedAndPhysicalUpdatesFollowTheSameExecutorAfterReregistration() throws Throwable {
+        var gpsQueue = new ArrayList<Runnable>();
+        var newQueue = new ArrayList<Runnable>();
+        var received = new ArrayList<Location>();
+        Executor original = gpsQueue::add;
+        var group = new AndroidLocationAdapter.ListenerGroup(received::add,
+                (provider, time, elapsed) -> location(provider, time, elapsed, 1), () -> true);
+        group.register(true, 0, original, (listener, dispatch) -> null);
+        group.startTimer(1000, original, () -> true);
+        group.register(false, 0, newQueue::add, (listener, dispatch) -> null);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertTrue(gpsQueue.isEmpty());
+        newQueue.remove(0).run();
+        assertEquals(1, received.size());
+        group.removeAll(listener -> {});
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    public void aPublishedSessionWakesAnIdleGpsSubscriptionAndInvalidatesQueuedFixes() throws Throwable {
+        var preferences = RuntimeEnvironment.getApplication().getSharedPreferences("timer", Context.MODE_PRIVATE);
+        var source = new SessionPlayback("dev.walk.tracker", preferences, e -> { throw new AssertionError(e); });
+        var received = new ArrayList<Location>();
+        var pending = new ArrayList<Runnable>();
+        var precise = new AtomicBoolean(true);
+        var enabled = new AtomicBoolean(true);
+        var group = new AndroidLocationAdapter.ListenerGroup(received::add, source, precise::get);
+        group.register(true, 10, null, (listener, dispatch) -> null);
+        group.startTimer(60_000, pending::add, enabled::get);
+        var clock = Shadows.shadowOf(Looper.getMainLooper());
+        clock.idle();
+        pending.remove(0).run();
+        assertTrue(received.isEmpty());
+
+        var route = new Route(List.of(new Route.Point(10, 20), new Route.Point(10.01, 20)), 2, Route.Profile.LINEAR);
+        var session = new Session("dev.walk.tracker", System.currentTimeMillis() - 1000, route);
+        preferences.edit().putString(Session.KEY, session.encode()).commit();
+        clock.idle();
+        Runnable beforeStop = pending.remove(0);
+        preferences.edit().remove(Session.KEY).commit();
+        clock.idle();
+        beforeStop.run();
+        pending.remove(0).run();
+        assertTrue(received.isEmpty());
+
+        preferences.edit().putString(Session.KEY, session.encode()).commit();
+        clock.idle();
+        pending.remove(0).run();
+        assertEquals(1, received.size());
+        assertEquals(20, received.get(0).getLongitude(), .000001);
+        enabled.set(false);
+        clock.idleFor(60, java.util.concurrent.TimeUnit.SECONDS);
+        pending.remove(0).run();
+        assertEquals(1, received.size());
+
+        enabled.set(true);
+        precise.set(false);
+        clock.idleFor(60, java.util.concurrent.TimeUnit.SECONDS);
+        pending.remove(0).run();
+        assertEquals(1, received.size());
+
+        precise.set(true);
+        clock.idleFor(60, java.util.concurrent.TimeUnit.SECONDS);
+        Runnable beforeRemove = pending.remove(0);
+        group.removeAll(listener -> {});
+        beforeRemove.run();
+        preferences.edit().remove(Session.KEY).commit();
+        clock.idleFor(60, java.util.concurrent.TimeUnit.SECONDS);
+        assertTrue(pending.isEmpty());
+        assertEquals(1, received.size());
     }
 
     private static LocationListener gpsListener(LocationListener listener, PlaybackSource source,
