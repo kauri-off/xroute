@@ -23,7 +23,6 @@ import android.widget.TextView;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import org.osmdroid.api.IGeoPoint;
 import org.osmdroid.config.Configuration;
 import org.osmdroid.events.MapEventsReceiver;
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
@@ -189,10 +188,6 @@ final class EditorMap {
         expand.setImageDrawable(new MapIcon(enabled ? "collapse" : "expand"));
     }
 
-    void addCenter() {
-        IGeoPoint center = map.getMapCenter();
-        listener.tap(new GeoPoint(center.getLatitude(), center.getLongitude()));
-    }
 
     void renderPoints(List<GeoPoint> points, int selected) {
         ArrayList<Overlay> overlays = new ArrayList<>(points.size() + 1);

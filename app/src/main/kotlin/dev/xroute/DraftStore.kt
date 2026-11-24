@@ -28,6 +28,11 @@ internal class DraftStore(private val context: Context) {
 
     fun open(title: String): Draft? = library.getString(title, null)?.let { read(prefs("route-$it")) }
 
+    fun delete(title: String) {
+        val id = library.getString(title, null) ?: return
+        if (library.edit().remove(title).commit()) context.deleteSharedPreferences("route-$id")
+    }
+
     fun save(title: String, draft: Draft) {
         val id = library.getString(title, null) ?: UUID.randomUUID().toString()
         write(draft, prefs("route-$id").edit()).apply()

@@ -25,14 +25,13 @@ internal fun EditorDialogs(
         EditorDialog.PROFILE -> "Профиль скорости"
         EditorDialog.SAVE -> "Сохранить маршрут"
         EditorDialog.OVERWRITE -> "Заменить маршрут «${name.trim()}»?"
-        EditorDialog.OPEN -> "Открыть маршрут"
+        EditorDialog.LIBRARY -> "Сохранённые маршруты"
+        EditorDialog.DELETE_SAVE -> "Удалить сохранение «$name»?"
     }
-    AlertDialog(onDismissRequest = close, title = { Text(title) }, text = {
+    val dismiss = { if (type == EditorDialog.DELETE_SAVE) show(EditorDialog.LIBRARY) else close() }
+    AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = {
         when (type) {
             EditorDialog.POINTS -> Column {
-                TextButton(onClick = { map.addCenter(); close() }) {
-                    Text(if (model.moving) "Перенести в центр" else "Добавить в центре")
-                }
                 val delivered = state.receipt()?.fix(state.session())
                 if (delivered != null) TextButton(onClick = { map.center(delivered.point().geoPoint()); close() }) {
                     Text("К точке воспроизведения")
@@ -53,9 +52,20 @@ internal fun EditorDialogs(
                 Choice("Удалить все точки…") { show(EditorDialog.CLEAR) }
             }
             EditorDialog.SAVE -> OutlinedTextField(name, setName, singleLine = true, label = { Text("Название маршрута") })
-            EditorDialog.OPEN, EditorDialog.PROFILE, EditorDialog.TARGET -> {
+            EditorDialog.LIBRARY -> {
+                if (model.names.isEmpty()) Text("Нет сохранённых маршрутов")
+                else LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    items(model.names.size, key = { model.names[it] }) { index ->
+                        val title = model.names[index]
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Text(title, Modifier.weight(1f).clickable { model.open(title); close() }.padding(vertical = 12.dp))
+                            TextButton(onClick = { setName(title); show(EditorDialog.DELETE_SAVE) }) { Text("Удалить") }
+                        }
+                    }
+                }
+            }
+            EditorDialog.PROFILE, EditorDialog.TARGET -> {
                 val options = when (type) {
-                    EditorDialog.OPEN -> model.names
                     EditorDialog.PROFILE -> profileNames
                     else -> state.targets()
                 }
@@ -63,7 +73,6 @@ internal fun EditorDialogs(
                     itemsIndexed(options) { index, value ->
                         Choice(value) {
                             when (type) {
-                                EditorDialog.OPEN -> model.open(value)
                                 EditorDialog.PROFILE -> model.edit(draft.copy(profile = Route.Profile.entries[index]))
                                 else -> model.controller.selectTarget(value)
                             }
@@ -76,6 +85,7 @@ internal fun EditorDialogs(
         }
     }, confirmButton = {
         when (type) {
+            EditorDialog.DELETE_SAVE -> Button(onClick = { model.deleteSave(name); show(EditorDialog.LIBRARY) }) { Text("Удалить") }
             EditorDialog.CLEAR -> Button(onClick = { model.delete(true); close() }) { Text("Удалить все") }
             EditorDialog.SAVE, EditorDialog.OVERWRITE -> Button(enabled = name.isNotBlank(), onClick = {
                 if (type == EditorDialog.SAVE && name.trim() in model.names) show(EditorDialog.OVERWRITE)
@@ -83,7 +93,7 @@ internal fun EditorDialogs(
             }) { Text(if (type == EditorDialog.OVERWRITE) "Заменить" else "Сохранить") }
             else -> Unit
         }
-    }, dismissButton = { TextButton(onClick = close) { Text("Закрыть") } })
+    }, dismissButton = { TextButton(onClick = dismiss) { Text(if (type == EditorDialog.DELETE_SAVE) "Отмена" else "Закрыть") } })
 }
 
 @Composable

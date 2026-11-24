@@ -21,7 +21,7 @@ import kotlinx.coroutines.delay
 
 internal val profileNames = listOf("Равномерно", "Разгон и торможение", "Волнами")
 
-internal enum class EditorDialog { POINTS, DELETE, CLEAR, TARGET, PROFILE, SAVE, OVERWRITE, OPEN }
+internal enum class EditorDialog { POINTS, DELETE, CLEAR, TARGET, PROFILE, SAVE, OVERWRITE, LIBRARY, DELETE_SAVE }
 
 @Composable
 internal fun EditorScreen(model: EditorModel, map: EditorMap, expanded: Boolean) {
@@ -54,14 +54,12 @@ internal fun EditorScreen(model: EditorModel, map: EditorMap, expanded: Boolean)
                     Column(Modifier.size(mapWidth, mapHeight).clipToBounds(),
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         AndroidView(factory = { map.view }, modifier = Modifier.fillMaxWidth().weight(1f))
+                        if (showMap && model.preview) LinearProgressIndicator(
+                            progress = { model.previewProgress }, modifier = Modifier.fillMaxWidth())
                         if (showMap) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                             TextButton(onClick = { dialog = EditorDialog.POINTS }) {
                                 Text(if (model.draft.selected < 0) "Точки" else "Точка ${model.draft.selected + 1} ▾")
                             }
-                            TextButton(enabled = model.draft.selected >= 0, onClick = {
-                                model.preview = false
-                                model.moving = !model.moving
-                            }) { Text(if (model.moving) "Отмена" else "Перенести") }
                             TextButton(enabled = model.draft.selected >= 0, onClick = { dialog = EditorDialog.DELETE }) { Text("Удалить ▾") }
                         }
                     }
@@ -117,14 +115,19 @@ private fun EditorControls(model: EditorModel, state: PlaybackState, modifier: M
             if (draft.points.size > WalkingDirections.MAX_WAYPOINTS) Text("Для построения по дорожкам доступно до ${WalkingDirections.MAX_WAYPOINTS} точек.")
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(enabled = ready, onClick = { show(EditorDialog.SAVE) }) { Text("Сохранить…") }
-                OutlinedButton(enabled = model.names.isNotEmpty(), onClick = { show(EditorDialog.OPEN) }) { Text("Открыть…") }
+                OutlinedButton(onClick = { show(EditorDialog.LIBRARY) }) { Text("Сохранения") }
             }
         }
         HorizontalDivider()
+        state.session()?.let { session ->
+            val elapsed = (state.nowMs() - session.startMs()) / 1000.0
+            val progress = (elapsed / session.route().durationSeconds()).toFloat().coerceIn(0f, 1f)
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().testTag("playback-progress"))
+        }
         Text(state.sessionText(), style = MaterialTheme.typography.bodySmall)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             TextButton(enabled = ready, onClick = {
-                model.moving = false
+                model.previewProgress = 0f
                 model.preview = !model.preview
                 if (model.preview) model.fitRequest++
             }) { Text(if (model.preview) "Скрыть просмотр" else "Предпросмотр") }
@@ -163,13 +166,14 @@ private fun SyncMap(model: EditorModel, map: EditorMap, state: PlaybackState) {
     LaunchedEffect(map, model.preview, state.receipt(), state.session()) {
         if (!model.preview) map.showPreview(state.receipt()?.fix(state.session()))
     }
-    LaunchedEffect(map, model.preview, route, model.moving, draft.selected) {
+    LaunchedEffect(map, model.preview, route, draft.selected) {
         if (model.preview && route != null) {
             val length = route.durationSeconds()
             val scale = maxOf(1.0, length / 24)
             val start = android.os.SystemClock.elapsedRealtime()
             while (true) {
                 val elapsed = minOf(length, (android.os.SystemClock.elapsedRealtime() - start) * scale / 1000)
+                model.previewProgress = (elapsed / length).toFloat().coerceIn(0f, 1f)
                 val fix = route.sample(elapsed)
                 map.showPreview(fix)
                 map.hint(if (elapsed >= length) "Финиш предпросмотра · ${duration(length)}" else
@@ -179,7 +183,6 @@ private fun SyncMap(model: EditorModel, map: EditorMap, state: PlaybackState) {
             }
         } else {
             map.hint(when {
-                model.moving -> "Коснитесь новой позиции точки ${draft.selected + 1}"
                 draft.points.size < 2 -> "Коснитесь карты, чтобы добавить точку"
                 route == null -> runCatching { draft.buildRoute() }.exceptionOrNull()?.message.orEmpty()
                 draft.points.size <= 5 -> "Удерживайте точку, чтобы перетащить"

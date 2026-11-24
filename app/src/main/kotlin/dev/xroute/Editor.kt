@@ -47,7 +47,6 @@ class Editor : ComponentActivity(), EditorMap.Listener {
             model.move(index, point.routePoint())
         } else {
             model.preview = false
-            model.moving = false
             val geometry = model.draft.points.map(Route.Point::geoPoint).toMutableList()
             if (index in geometry.indices) geometry[index] = point
             map.renderLine(geometry, false)

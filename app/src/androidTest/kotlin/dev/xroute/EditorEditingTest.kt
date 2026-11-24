@@ -40,7 +40,7 @@ class EditorEditingTest {
                 compose.onNodeWithText("Удалить все точки…").performClick()
                 compose.onNodeWithText("Удалить все").performClick()
                 compose.onNodeWithText("Точки").assertIsDisplayed()
-                compose.onNodeWithText("Открыть…").performScrollTo().performClick()
+                compose.onNodeWithText("Сохранения").performScrollTo().performClick()
                 compose.onNodeWithText(name).performClick()
                 compose.onNodeWithText("Точка 2 ▾").assertIsDisplayed()
                 screen.onActivity { activity ->
@@ -55,6 +55,14 @@ class EditorEditingTest {
                     assertTrue(control.performClick())
                 }
                 compose.onNodeWithTag("playback-stop").assertIsDisplayed()
+                compose.onNodeWithText("Сохранения").performScrollTo().performClick()
+                compose.onNodeWithText("Удалить").performClick()
+                compose.onNodeWithText("Отмена").performClick()
+                compose.onNodeWithText(name).assertIsDisplayed()
+                compose.onNodeWithText("Удалить").performClick()
+                compose.onNodeWithText("Удалить").performClick()
+                compose.onNodeWithText(name).assertDoesNotExist()
+                assertEquals(null, DraftStore(context).open(name))
             }
             val restored = DraftStore(context).read()
             assertEquals(2, restored.points.size)

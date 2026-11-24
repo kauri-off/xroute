@@ -14,7 +14,7 @@ internal class EditorModel(application: Application) : AndroidViewModel(applicat
     var draft by mutableStateOf(store.read())
         private set
     val route by derivedStateOf { runCatching { draft.buildRoute() }.getOrNull() }
-    var moving by mutableStateOf(false)
+    var previewProgress by mutableFloatStateOf(0f)
     var dragging by mutableStateOf(false)
     var preview by mutableStateOf(false)
     var routing by mutableStateOf(false)
@@ -38,7 +38,6 @@ internal class EditorModel(application: Application) : AndroidViewModel(applicat
 
     fun select(index: Int) {
         if (index !in draft.points.indices) return
-        moving = false
         draft = draft.copy(selected = index)
     }
 
@@ -50,12 +49,9 @@ internal class EditorModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun tap(point: Route.Point) {
-        if (moving && draft.selected in draft.points.indices) {
-            move(draft.selected, point)
-        } else if (draft.points.size < 2000) {
+        if (draft.points.size < 2000) {
             edit(draft.copy(points = draft.points + point, selected = draft.points.size))
         } else message = "Достигнут лимит в 2000 точек"
-        moving = false
     }
 
     fun move(index: Int, point: Route.Point) {
@@ -65,7 +61,6 @@ internal class EditorModel(application: Application) : AndroidViewModel(applicat
 
     fun delete(all: Boolean) {
         val points = if (all) emptyList() else draft.points.filterIndexed { index, _ -> index != draft.selected }
-        moving = false
         edit(draft.copy(points = points, selected = minOf(draft.selected, points.lastIndex),
             waypoints = if (all) emptyList() else draft.waypoints))
     }
@@ -76,9 +71,13 @@ internal class EditorModel(application: Application) : AndroidViewModel(applicat
         message = "Маршрут сохранён"
     }
 
+    fun deleteSave(title: String) {
+        store.delete(title)
+        names = store.titles()
+    }
+
     fun open(title: String) {
         val saved = store.open(title) ?: return
-        moving = false
         edit(saved)
         fitRequest++
     }
@@ -90,7 +89,6 @@ internal class EditorModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun replacePath(next: Draft) {
-        moving = false
         edit(next)
         fitRequest++
     }

@@ -39,6 +39,13 @@ class EditorPlaybackTest {
                 assertTrue(fix.latitude > session.route().points.first().lat())
                 assertNull(other.sample("gps"))
                 screen.recreate()
+                compose.waitUntil(5000) {
+                    runCatching {
+                        val info = compose.onNodeWithTag("playback-progress").fetchSemanticsNode()
+                            .config[SemanticsProperties.ProgressBarRangeInfo]
+                        info.current in 0f..1f
+                    }.getOrDefault(false)
+                }
                 clickWhenEnabled("playback-stop")
                 compose.waitUntil(5000) { framework.published() == null }
                 assertNull(source.sample("gps"))
