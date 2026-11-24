@@ -15,6 +15,14 @@ public class RouteTest {
         assertEquals(new Route.Fix(new Route.Point(0, -178), 0, 0), route.sample(2 * degree));
     }
 
+    @Test public void leavesNorthPoleAlongDestinationMeridian() {
+        Route route = new Route(List.of(new Route.Point(90, 5), new Route.Point(80, 125)),
+                1, Route.Profile.LINEAR);
+        var midpoint = route.sample(route.durationSeconds() / 2).point();
+        assertEquals(85, midpoint.lat(), 1e-8);
+        assertEquals(125, midpoint.lon(), 1e-8);
+    }
+
     @Test public void speedMatchesTravelledDistance() {
         for (Route.Profile profile : Route.Profile.values()) {
             Route route = new Route(List.of(new Route.Point(0, 0), new Route.Point(0, 1)), 2, profile);
