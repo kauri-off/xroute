@@ -55,6 +55,9 @@ public final class Editor extends Activity implements EditorMap.Listener {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService directions = Executors.newSingleThreadExecutor();
     private final Runnable refreshVector = this::refreshVector;
+    private final Runnable pollScope = this::pollScope;
+    private AlertDialog targetPicker;
+    private boolean resumed;
     private final Runnable sessionClock = this::updateSessionClock;
     private final Runnable previewFrame = this::updatePreview;
 
@@ -230,7 +233,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
         tools.setPadding(0, style.dp(6), 0, style.dp(2));
         pointPicker = style.button("Точки", INK, SURFACE, this::choosePoint);
         move = style.button("Перенести", INK, SURFACE, this::toggleMove);
-        delete = style.button("Удалить", WARNING, SURFACE, this::deletePoint);
+        delete = style.button("Удалить ▾", WARNING, SURFACE, this::chooseDeletion);
         style.weightedButton(tools, pointPicker, 1.15f, 0);
         style.weightedButton(tools, move, 1.1f, 6);
         style.weightedButton(tools, delete, 1, 6);
@@ -332,6 +335,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
         routeStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         fields.addView(routeStatus);
 
+        style.spacing(fields, 10);
         LinearLayout files = style.row();
         saveRoute = style.button("Сохранить…", ACCENT, ACCENT_LIGHT, this::nameRoute);
         openRoute = style.button("Открыть…", ACCENT, ACCENT_LIGHT, this::chooseRoute);
@@ -441,6 +445,26 @@ public final class Editor extends Activity implements EditorMap.Listener {
         updateMapHint();
     }
 
+    private void chooseDeletion() {
+        if (points.isEmpty()) return;
+        String[] options = {"Удалить точку " + (selected + 1), "Удалить все точки…"};
+        new AlertDialog.Builder(this).setTitle("Удаление точек").setItems(options, (dialog, index) -> {
+            if (index == 0) {
+                deletePoint();
+                return;
+            }
+            new AlertDialog.Builder(this).setMessage("Удалить все точки из текущего маршрута?")
+                    .setNegativeButton("Отмена", null).setPositiveButton("Удалить все", (d, w) -> {
+                        points.clear();
+                        originalWaypoints = Collections.emptyList();
+                        selected = -1;
+                        moving = false;
+                        changePoints();
+                        saveDraft();
+                    }).show();
+        }).setNegativeButton("Отмена", null).show();
+    }
+
     private void deletePoint() {
         if (selected < 0) return;
         points.remove(selected);
@@ -464,7 +488,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
         move.setText(moving ? "Отмена" : "Перенести");
         move.setContentDescription(moving ? "Отменить перенос" : "Перенести выбранную точку");
         delete.setEnabled(selected >= 0);
-        delete.setContentDescription("Удалить выбранную точку");
+        delete.setContentDescription("Удалить одну или все точки");
     }
 
     private void changeMotion(boolean redraw) {
@@ -650,7 +674,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
     private void chooseTarget() {
         if (scope == null || scope.size() < 2) return;
         String[] packages = scope.toArray(new String[0]);
-        new AlertDialog.Builder(this).setTitle("Приложения из Vector")
+        targetPicker = new AlertDialog.Builder(this).setTitle("Приложения из Vector")
                 .setSingleChoiceItems(packages, scope.indexOf(target), (dialog, index) -> {
                     target = packages[index];
                     updateVectorLabels();
@@ -658,11 +682,45 @@ public final class Editor extends Activity implements EditorMap.Listener {
                 }).show();
     }
 
+    private void applyScope(List<String> allowed) {
+        List<String> next = allowed == null ? null : allowed.stream()
+                .filter(name -> name != null && PACKAGE.matcher(name).matches() && !name.equals(getPackageName()))
+                .distinct().sorted().collect(java.util.stream.Collectors.toList());
+        if (!java.util.Objects.equals(scope, next) && targetPicker != null) targetPicker.dismiss();
+        scope = next;
+        if (scope != null && !scope.contains(target)) target = scope.size() == 1 ? scope.get(0) : "";
+    }
+
+    private void pollScope() {
+        XposedService bound = service;
+        if (!resumed || bound == null) return;
+        companion.vector.execute(() -> {
+            List<String> result;
+            try {
+                result = bound.getScope();
+            } catch (RuntimeException e) {
+                result = null;
+            }
+            List<String> allowed = result;
+            main.post(() -> {
+                if (!resumed || destroyed || service != bound) return;
+                applyScope(allowed);
+                updateVectorLabels();
+                scheduleScopePoll();
+            });
+        });
+    }
+
+    private void scheduleScopePoll() {
+        main.removeCallbacks(pollScope);
+        if (resumed && service != null) main.postDelayed(pollScope, 2000);
+    }
+
     private void refreshVector() {
         var bound = companion.service();
         if (bound != service) {
             service = bound;
-            scope = null;
+            applyScope(null);
             active = null;
             sessionStored = false;
             vectorFailed = false;
@@ -700,10 +758,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
             boolean exists = stored, readFailed = failed, readConfirmed = read;
             main.post(() -> {
                 if (destroyed || service != bound) return;
-                scope = allowed == null ? null : allowed.stream()
-                        .filter(name -> name != null && PACKAGE.matcher(name).matches() && !name.equals(getPackageName()))
-                        .distinct().sorted().collect(java.util.stream.Collectors.toList());
-                if (scope != null && !scope.contains(target)) target = scope.size() == 1 ? scope.get(0) : "";
+                applyScope(allowed);
                 if (readConfirmed) {
                     active = current;
                     sessionStored = exists;
@@ -711,6 +766,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
                 vectorFailed = readFailed;
                 vectorLoading = false;
                 updateVectorLabels();
+                scheduleScopePoll();
             });
         });
     }
@@ -775,7 +831,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
         if (!connected) info = "Включите XRoute в менеджере Vector.";
         else if (scope == null && vectorLoading) info = "Проверяем область действия…";
         else if (scope == null) info = "Не удалось прочитать область действия Vector.";
-        else if (scope.isEmpty()) info = "Выберите приложение в области действия XRoute в Vector.";
+        else if (scope.isEmpty()) info = "Выберите приложение в области действия XRoute в Vector и нажмите «Применить».";
         else info = "";
         scopeStatus.setText(info);
         scopeStatus.setVisibility(info.isEmpty() ? View.GONE : View.VISIBLE);
@@ -999,6 +1055,7 @@ public final class Editor extends Activity implements EditorMap.Listener {
     @Override protected void onResume() {
         super.onResume();
         editorMap.onResume();
+        resumed = true;
         companion.observe(refreshVector);
     }
 
@@ -1008,6 +1065,8 @@ public final class Editor extends Activity implements EditorMap.Listener {
     }
 
     @Override protected void onPause() {
+        resumed = false;
+        main.removeCallbacks(pollScope);
         companion.unobserve(refreshVector);
         main.removeCallbacks(sessionClock);
         resetPreview();

@@ -41,6 +41,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Before;
@@ -111,8 +113,12 @@ public class ModuleEntryTest {
         assertNull(framework.dispatch(last, manager, (receiver, args) -> null, GPS));
 
         var received = new ArrayList<Location>();
+        var timed = new LinkedBlockingQueue<Location>();
         LocationListener receiver = new LocationListener() {
-            @Override public void onLocationChanged(Location fix) { received.add(fix); }
+            @Override public void onLocationChanged(Location fix) {
+                if (fix.getElapsedRealtimeNanos() > second.getElapsedRealtimeNanos()) timed.add(fix);
+                else received.add(fix);
+            }
             @Override public void onLocationChanged(List<Location> fixes) { received.addAll(fixes); }
         };
         var upstream = new AtomicReference<LocationListener>();
@@ -138,11 +144,19 @@ public class ModuleEntryTest {
         }
         assertBatch(Build.VERSION.SDK_INT >= 31 ? Arrays.asList(first, second) : Collections.singletonList(first), received);
 
+        Location tick = timed.poll(4, TimeUnit.SECONDS);
+        assertNotNull("Expected a route fix without an upstream callback", tick);
+        assertEquals(GPS, tick.getProvider());
+        assertEquals(20, tick.getLongitude(), .000001);
+        assertTrue(tick.getLatitude() > 10);
+
         Method remove = LocationManager.class.getMethod("removeUpdates", LocationListener.class);
         framework.dispatch(remove, manager, (object, args) -> {
             assertSame(upstream.get(), args[0]);
             return null;
         }, receiver);
+        timed.clear();
+        assertNull(timed.poll(1500, TimeUnit.MILLISECONDS));
     }
 
     @Test public void fusedLastAndBatchedCallbackRespectPublishedTarget() throws Throwable {

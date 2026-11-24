@@ -15,6 +15,7 @@ import android.location.LocationRequest;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
+import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.util.Log;
@@ -27,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -197,8 +200,28 @@ final class AndroidLocationAdapter {
             if (dispatch != null) arguments[2] = dispatch;
             return chain.proceed(arguments);
         });
+        if (gps) configureTimer(group, (LocationManager) chain.getThisObject(), arguments, index, executor);
         entries.put(listener, new WeakReference<>(group));
         return result;
+    }
+
+    private void configureTimer(ListenerGroup group, LocationManager manager, Object[] args, int index, Executor executor) {
+        group.stopTimer();
+        long interval;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && args[1] instanceof LocationRequest request) {
+            if (request.getMaxUpdates() != Integer.MAX_VALUE || request.getDurationMillis() != Long.MAX_VALUE) return;
+            interval = request.getIntervalMillis();
+        } else if (args.length >= 4 && args[0] instanceof String && args[1] instanceof Long millis) {
+            interval = millis;
+            if (args[index - 1] instanceof Executor requested) executor = requested;
+        } else return;
+        if (interval == Long.MAX_VALUE) return;
+        if (executor == null) {
+            Looper looper = args[args.length - 1] instanceof Looper specified ? specified : Looper.myLooper();
+            Handler handler = new Handler(looper != null ? looper : Looper.getMainLooper());
+            executor = handler::post;
+        }
+        group.startTimer(Math.max(250L, interval), executor, () -> manager.isProviderEnabled(GPS));
     }
 
     private synchronized Object flush(Chain chain) throws Throwable {
@@ -246,6 +269,53 @@ final class AndroidLocationAdapter {
         private final ListenerBridge other = new ListenerBridge(this);
         private boolean gpsRegistered, otherRegistered;
         private volatile Executor executor;
+        private volatile Pulse pulse;
+
+        void startTimer(long interval, Executor destination, BooleanSupplier enabled) {
+            pulse = new Pulse(interval, destination, enabled);
+            pulse.schedule();
+        }
+
+        void stopTimer() {
+            Pulse previous = pulse;
+            pulse = null;
+            if (previous != null) previous.handler.removeCallbacks(previous);
+        }
+
+        private final class Pulse implements Runnable {
+            final Handler handler = new Handler(Looper.getMainLooper());
+            final long interval;
+            final Executor destination;
+            final BooleanSupplier enabled;
+
+            Pulse(long interval, Executor destination, BooleanSupplier enabled) {
+                this.interval = interval;
+                this.destination = destination;
+                this.enabled = enabled;
+            }
+
+            void schedule() {
+                if (pulse == this) handler.postDelayed(this, Math.min(interval, Integer.MAX_VALUE));
+            }
+
+            @Override public void run() {
+                if (pulse != this) return;
+                try {
+                    destination.execute(() -> {
+                        try {
+                            if (pulse != this) return;
+                            Location fix = source.sample(GPS);
+                            if (fix != null && preciseAccess.getAsBoolean() && enabled.getAsBoolean()
+                                    && pulse == this && gps.filter.acceptTimed(fix, interval, true)) {
+                                listener.onLocationChanged(fix);
+                            }
+                        } finally {
+                            schedule();
+                        }
+                    });
+                } catch (RejectedExecutionException ignored) {}
+            }
+        }
         private final Executor dispatch = task -> executor.execute(task);
 
         ListenerGroup(LocationListener listener, PlaybackSource source, BooleanSupplier preciseAccess) {
@@ -282,7 +352,10 @@ final class AndroidLocationAdapter {
                 if (bridge == null) continue;
                 try {
                     operation.remove(bridge);
-                    if (bridge == gps) gpsRegistered = false;
+                    if (bridge == gps) {
+                        stopTimer();
+                        gpsRegistered = false;
+                    }
                     else otherRegistered = false;
                 } catch (Throwable error) {
                     if (failure == null) failure = error;
@@ -295,6 +368,19 @@ final class AndroidLocationAdapter {
 
     static final class GpsFilter {
         private final float distance;
+        private long lastElapsed;
+        private boolean lastTimed;
+
+        synchronized boolean acceptTimed(Location fix, long interval, boolean timed) {
+            long elapsed = fix.getElapsedRealtimeNanos();
+            if ((lastTimed || timed) && lastElapsed > 0
+                    && elapsed - lastElapsed < TimeUnit.MILLISECONDS.toNanos(interval)) return false;
+            if (!accept(fix, true)) return false;
+            lastElapsed = elapsed;
+            lastTimed = timed;
+            return true;
+        }
+
         private Location previousReal;
         private Location previousReplacement;
 
@@ -321,6 +407,10 @@ final class AndroidLocationAdapter {
             if (filter == null || original == null || !GPS.equals(original.getProvider())) return original;
             Location sample = playback.sample(GPS, original.getTime(), original.getElapsedRealtimeNanos());
             Location candidate = sample != null && group.preciseAccess.getAsBoolean() ? sample : original;
+            var pulse = group.pulse;
+            if (candidate != original && pulse != null) {
+                return filter.acceptTimed(candidate, pulse.interval, false) ? candidate : null;
+            }
             return filter.accept(candidate, candidate != original) ? candidate : null;
         }
 
