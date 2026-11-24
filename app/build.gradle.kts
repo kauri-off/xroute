@@ -1,4 +1,6 @@
 import com.android.build.api.variant.HostTestBuilder
+import com.android.build.api.variant.SigningConfigInfo
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -12,7 +14,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1"
+        versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes {
@@ -34,6 +36,32 @@ android {
 androidComponents {
     beforeVariants(selector().withBuildType("debug")) { variant ->
         variant.hostTests.getValue(HostTestBuilder.UNIT_TEST_TYPE).enable = true
+    }
+    onVariants(selector().withBuildType("release")) { variant ->
+        val propertiesPath = providers.gradleProperty("xrouteSigningProperties")
+            .getOrElse("keystore/keystore.properties")
+        val propertiesFile = rootProject.layout.projectDirectory.file(propertiesPath)
+        val signingInfo = providers.fileContents(propertiesFile).asBytes.orElse(byteArrayOf()).map { bytes ->
+            if (bytes.isEmpty()) {
+                throw GradleException("Release signing properties are missing or empty: $propertiesPath. Set -PxrouteSigningProperties to override the path.")
+            }
+            val properties = try {
+                Properties().apply { bytes.inputStream().use(::load) }
+            } catch (_: IllegalArgumentException) {
+                throw GradleException("Invalid release signing properties: $propertiesPath")
+            }
+            fun required(name: String): String = properties.getProperty(name)?.takeIf { it.isNotBlank() }
+                ?: throw GradleException("Missing $name in release signing properties: $propertiesPath")
+
+            SigningConfigInfo(
+                storeFile = propertiesFile.asFile.parentFile.resolve(required("storeFile")),
+                storePassword = required("storePassword"),
+                keyAlias = required("keyAlias"),
+                keyPassword = required("keyPassword"),
+                storeType = properties.getProperty("storeType", "PKCS12"),
+            )
+        }
+        variant.signingConfig.from(signingInfo)
     }
 }
 

@@ -33,10 +33,10 @@ Android-компаньон и модуль Vector для воспроизвед�
 Для сборки нужны JDK 17 и Android SDK Platform 37.2.
 
 ```sh
-./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug :app:assembleIntegration :app:assembleIntegrationAndroidTest
+./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleIntegration :app:assembleIntegrationAndroidTest
 ```
 
-Устанавливаемая отладочная сборка — `app/build/outputs/apk/debug/app-debug.apk`. Сборка release выпускается без подписи. Для проверки на эмуляторе используется отдельная сборка с суффиксом .integration. Только в этой сборке тестовый трекер запрашивает точное местоположение. Выберите serial эмулятора явно.
+Устанавливаемая отладочная сборка — `app/build/outputs/apk/debug/app-debug.apk`. Для проверки на эмуляторе используется отдельная сборка с суффиксом .integration. Только в этой сборке тестовый трекер запрашивает точное местоположение. Выберите serial эмулятора явно.
 
 ```sh
 adb -s emulator-5554 install -r app/build/outputs/apk/integration/app-integration.apk
@@ -45,3 +45,13 @@ adb -s emulator-5554 shell am instrument -w io.github.kauri_off.xroute.integrati
 ```
 
 Инструментальные тесты проверяют публикацию через тестовый Binder, чтение активного маршрута только для выбранного пакета, остановку и контракты Google Play Services на классах SDK. Тестовый диспетчер загружает Java entry API 102 и вызывает зарегистрированные перехватчики на сигнатурах Android данного эмулятора. Сквозная проверка записи конкретным трекером требует эмулятора с установленным Vector.
+
+### Подписанный релиз
+
+Gradle читает `keystore/keystore.properties` из корня проекта. Файл содержит `storeFile=xroute-release.p12`, `keyAlias=xroute`, `storePassword` и `keyPassword`. Относительный `storeFile` считается от каталога файла свойств. Тип хранилища по умолчанию — `PKCS12`. Каталог `keystore/` исключён из Git.
+
+```sh
+./gradlew :app:assembleRelease
+```
+
+Подписанный APK находится в `app/build/outputs/apk/release/app-release.apk`. Если файл свойств или ключ недоступен, сборка релиза завершится ошибкой. Чтобы указать другой файл свойств, добавьте `-PxrouteSigningProperties=/путь/к/keystore.properties`. Относительное значение этого параметра считается от корня проекта.
